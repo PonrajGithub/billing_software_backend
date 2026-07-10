@@ -36,6 +36,19 @@ class AuthController extends Controller
             }
 
             if (Hash::check($password, $user->password)) {
+                if ($user->role === 'cashier') {
+                    $admin = User::find($user->admin_id);
+                    if ($admin && $admin->email) {
+                        try {
+                            Mail::raw("Cashier {$user->name} ({$user->email}) has successfully logged in at " . now()->toDateTimeString(), function ($message) use ($admin) {
+                                $message->to($admin->email)->subject("Cashier Login Notification");
+                            });
+                        } catch (\Exception $e) {
+                            logger()->error("Failed to send cashier login notification to admin: " . $e->getMessage());
+                        }
+                    }
+                }
+
                 return response()->json([
                     "status" => true,
                     "role"   => $user->role,
@@ -240,11 +253,98 @@ class AuthController extends Controller
                 ]);
             }
 
-            Mail::raw("Your OTP is: $otp", function ($message) use ($email) {
-                $message->to($email)->subject("Your OTP Code");
-            });
+            try {
+                Mail::raw("Your OTP is: $otp", function ($message) use ($email) {
+                    $message->to($email)->subject("Your OTP Code");
+                });
+            } catch (\Exception $mailEx) {
+                if (config('app.env') === 'local') {
+                    return response()->json([
+                        "status" => "success",
+                        "message" => "OTP generated (Local test mode): " . $otp
+                    ]);
+                }
+                throw $mailEx;
+            }
 
             return response()->json(["status" => "success", "message" => "OTP sent"]);
+        } catch (\Exception $e) {
+            return response()->json(["status" => "error", "message" => $e->getMessage()]);
+        }
+    }
+
+    public function sendOtpForCredit(Request $request)
+    {
+        $user_id = intval($request->input('user_id'));
+        $role = $request->input('role');
+
+        if (!$user_id || !$role) {
+            return response()->json(["status" => "error", "message" => "User ID and Role required"]);
+        }
+
+        $email = null;
+
+        if ($role === 'admin') {
+            $user = User::find($user_id);
+            if ($user && $user->email) {
+                $email = $user->email;
+            } else {
+                $company = Company::find($user_id);
+                if ($company && $company->owner_email) {
+                    $email = $company->owner_email;
+                }
+            }
+        } elseif ($role === 'cashier') {
+            $cashier = User::find($user_id);
+            if ($cashier && $cashier->admin_id) {
+                $admin = User::find($cashier->admin_id);
+                if ($admin && $admin->email) {
+                    $email = $admin->email;
+                } else {
+                    $company = Company::find($cashier->admin_id);
+                    if ($company && $company->owner_email) {
+                        $email = $company->owner_email;
+                    }
+                }
+            }
+        }
+
+        if (!$email) {
+            return response()->json(["status" => "error", "message" => "Admin email not found"]);
+        }
+
+        $otp = rand(100000, 999999);
+        $expiry = date("Y-m-d H:i:s", strtotime("+5 minutes"));
+
+        try {
+            $targetUser = User::where('email', $email)->first();
+            if ($targetUser) {
+                $targetUser->update([
+                    'otp' => $otp,
+                    'otp_expiry' => $expiry
+                ]);
+            }
+
+            try {
+                Mail::raw("Your OTP for authorizing Customer Credit Limit is: $otp", function ($message) use ($email) {
+                    $message->to($email)->subject("Credit Limit Verification OTP");
+                });
+            } catch (\Exception $mailEx) {
+                if (config('app.env') === 'local') {
+                    return response()->json([
+                        "status" => "success",
+                        "email" => $email,
+                        "message" => "OTP generated (Local test mode): " . $otp
+                    ]);
+                }
+                throw $mailEx;
+            }
+
+            return response()->json([
+                "status" => "success",
+                "email" => $email,
+                "message" => "OTP sent successfully to " . $email
+            ]);
         } catch (\Exception $e) {
             return response()->json(["status" => "error", "message" => $e->getMessage()]);
         }

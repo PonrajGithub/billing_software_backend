@@ -24,6 +24,7 @@ Route::prefix('auth')->group(function () {
     Route::post('register', [AuthController::class, 'register']);
     Route::post('forgot_password', [AuthController::class, 'forgotPassword']);
     Route::post('send_otp', [AuthController::class, 'sendOtp']);
+    Route::post('send_otp_for_credit', [AuthController::class, 'sendOtpForCredit']);
     Route::post('verify_otp', [AuthController::class, 'verifyOtp']);
     Route::post('logout', [AuthController::class, 'logout']);
 });
