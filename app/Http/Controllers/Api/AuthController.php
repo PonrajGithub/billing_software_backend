@@ -36,6 +36,16 @@ class AuthController extends Controller
             }
 
             if (Hash::check($password, $user->password)) {
+                if ($user->active_token) {
+                    return response()->json([
+                        "status" => false,
+                        "message" => "This account is already logged in on another device."
+                    ]);
+                }
+
+                $token = \Illuminate\Support\Str::random(60);
+                $user->update(['active_token' => $token]);
+
                 if ($user->role === 'cashier') {
                     $admin = User::find($user->admin_id);
                     if ($admin && $admin->email) {
@@ -52,6 +62,7 @@ class AuthController extends Controller
                 return response()->json([
                     "status" => true,
                     "role"   => $user->role,
+                    "active_token" => $token,
                     "data"   => [
                         "id"         => $user->id,
                         "name"       => $user->name,
@@ -379,6 +390,16 @@ class AuthController extends Controller
 
     public function logout(Request $request)
     {
+        $id = intval($request->input('id'));
+        $role = $request->input('role');
+
+        if ($id) {
+            $user = User::where('id', $id)->first();
+            if ($user && $user->role === $role) {
+                $user->update(['active_token' => null]);
+            }
+        }
+
         return response()->json([
             "status" => true,
             "message" => "Logged out successfully"
