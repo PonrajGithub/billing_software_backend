@@ -475,30 +475,65 @@ class InvoiceController extends Controller
         ]);
     }
 
-    public function getInvoiceById(Request $request)
-    {
-        $idVal = $request->input('id') ?: $request->query('id', '');
-        if (is_numeric($idVal)) {
-            $invoice = Invoice::find(intval($idVal));
-        } else {
-            $invoice = Invoice::where('invoice_no', $idVal)->first();
-        }
+    // public function getInvoiceById(Request $request)
+    // {
+    //     $idVal = $request->input('id') ?: $request->query('id', '');
+    //     if (is_numeric($idVal)) {
+    //         $invoice = Invoice::find(intval($idVal));
+    //     } else {
+    //         $invoice = Invoice::where('invoice_no', $idVal)->first();
+    //     }
         
-        if (!$invoice) {
-            $invoice = Invoice::where('id', intval($idVal))->first();
-        }
+    //     if (!$invoice) {
+    //         $invoice = Invoice::where('id', intval($idVal))->first();
+    //     }
 
-        if (!$invoice) {
-            return response()->json(["status" => false, "message" => "Invoice not found"]);
-        }
+    //     if (!$invoice) {
+    //         return response()->json(["status" => false, "message" => "Invoice not found"]);
+    //     }
 
-        $data = $invoice->toArray();
-        if (is_string($data['products'])) {
-            $data['products'] = json_decode($data['products']);
-        }
+    //     $data = $invoice->toArray();
+    //     if (is_string($data['products'])) {
+    //         $data['products'] = json_decode($data['products']);
+    //     }
 
-        return response()->json(["status" => true, "data" => $data]);
+    //     return response()->json(["status" => true, "data" => $data]);
+    // }
+
+    public function getInvoiceById(Request $request)
+{
+    $idVal = $request->input('id') ?: $request->query('id', '');
+
+    $query = DB::table('invoices as i')
+        ->leftJoin('companies as c', 'i.company_id', '=', 'c.id')
+        ->leftJoin('users as u', 'i.cashier_id', '=', 'u.id')
+        ->select(
+            'i.*',
+            'c.company_name',
+            'c.company_address',
+            'c.phone',
+            'c.gstin',
+            'c.logo',
+            'u.name as cashier_name'
+        );
+
+    if (is_numeric($idVal)) {
+        $invoice = (clone $query)->where('i.id', intval($idVal))->first();
+    } else {
+        $invoice = (clone $query)->where('i.invoice_no', $idVal)->first();
     }
+
+    if (!$invoice) {
+        return response()->json(["status" => false, "message" => "Invoice not found"]);
+    }
+
+    $data = (array) $invoice;
+    if (is_string($data['products'])) {
+        $data['products'] = json_decode($data['products']);
+    }
+
+    return response()->json(["status" => true, "data" => $data]);
+}
 
     public function getPendingInvoice(Request $request)
     {
