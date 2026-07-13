@@ -12,6 +12,7 @@ use App\Models\Subcategory;
 use App\Models\Brand;
 use App\Models\Supplier;
 use Illuminate\Support\Facades\DB;
+use App\Models\PurchasePayment;
 
 class PurchaseController extends Controller
 {
@@ -41,6 +42,8 @@ class PurchaseController extends Controller
             $subcategoryName = trim($item['subcategory_name'] ?? '');
             $brandName = trim($item['brand_name'] ?? '');
             $price = floatval($item['price'] ?? 0);
+            $sellingPrice = floatval($item['selling_price'] ?? 0);
+            $sellingPricePerUnit = trim($item['selling_price_per_unit'] ?? '');
             $quantity = intval($item['quantity'] ?? 0);
             $unit = trim($item['unit'] ?? '');
             $gstPercentage = floatval($item['gst_percentage'] ?? 0);
@@ -142,6 +145,8 @@ class PurchaseController extends Controller
                 'subcategory_name' => $subcategoryName,
                 'brand_name' => $brandName,
                 'price' => $price,
+                'selling_price' => $sellingPrice,
+                'selling_price_per_unit' => $sellingPricePerUnit ?: null,
                 'quantity' => $quantity,
                 'unit' => $unit ?: 'pcs',
                 'gst_percentage' => $gstPercentage,
@@ -239,6 +244,8 @@ class PurchaseController extends Controller
                     'subcategory_id' => $item['subcategory_id'] ?? null,
                     'brand_id' => $item['brand_id'] ?? null,
                     'price' => floatval($item['price'] ?? 0),
+                    'selling_price' => floatval($item['selling_price'] ?? 0),
+                    'selling_price_per_unit' => trim($item['selling_price_per_unit'] ?? '') ?: null,
                     'quantity' => intval($item['quantity'] ?? 0),
                     'unit' => trim($item['unit'] ?? 'pcs'),
                     'gst_percentage' => floatval($item['gst_percentage'] ?? 0),
@@ -337,6 +344,8 @@ class PurchaseController extends Controller
                 $subcategoryName = trim($item['subcategory_name'] ?? '');
                 $brandName = trim($item['brand_name'] ?? '');
                 $price = floatval($item['price'] ?? 0);
+                $sellingPrice = floatval($item['selling_price'] ?? 0);
+                $sellingPricePerUnit = trim($item['selling_price_per_unit'] ?? '');
                 $qty = intval($item['quantity'] ?? 0);
                 $unit = trim($item['unit'] ?? 'pcs');
                 $gstPct = floatval($item['gst_percentage'] ?? 0);
@@ -397,7 +406,7 @@ class PurchaseController extends Controller
                             'category_id' => $categoryId,
                             'subcategory_id' => $subcategoryId,
                             'brand_id' => $brandId,
-                            'price' => $price, // Cost price
+                            'price' => $sellingPrice, // selling_price is product table's price field
                             'stock' => 0, // Stock starts at 0, incremented below
                             'unit' => $unit,
                             'gst_percentage' => $gstPct,
@@ -415,8 +424,10 @@ class PurchaseController extends Controller
                     $prod = Product::find($productId);
                     if ($prod) {
                         $prod->increment('stock', $qty);
-                        // Optional: update product cost price to latest invoice price
-                        $prod->update(['price' => $price]);
+                        // Optional: update product price to latest selling price
+                        $prod->update([
+                            'price' => $sellingPrice
+                        ]);
                     }
                 }
 
@@ -434,9 +445,24 @@ class PurchaseController extends Controller
                     'subcategory_id' => $subcategoryId,
                     'brand_id' => $brandId,
                     'price' => $price,
+                    'selling_price' => $sellingPrice,
+                    'selling_price_per_unit' => $sellingPricePerUnit ?: null,
                     'quantity' => $qty,
                     'unit' => $unit,
                     'gst_percentage' => $gstPct,
+                ]);
+            }
+
+            // Record initial payment if paid_amount > 0
+            $paidAmount = floatval($request->input('paid_amount', 0));
+            if ($paidAmount > 0) {
+                PurchasePayment::create([
+                    'purchase_id' => $purchase->id,
+                    'company_id' => $companyId,
+                    'amount' => $paidAmount,
+                    'payment_method' => 'cash',
+                    'payment_date' => $purchaseDate,
+                    'notes' => 'Initial payment upon invoice submission'
                 ]);
             }
 
@@ -543,5 +569,214 @@ class PurchaseController extends Controller
             'status' => true,
             'message' => 'Purchase draft deleted successfully'
         ]);
+    }
+
+    /**
+     * Record a payment towards a purchase invoice balance.
+     */
+    public function payPurchase(Request $request)
+    {
+        $purchaseId = intval($request->input('purchase_id', 0));
+        $amount = floatval($request->input('amount', 0));
+        $paymentMethod = $request->input('payment_method', 'cash');
+        $paymentDate = $request->input('payment_date', date('Y-m-d'));
+        $notes = $request->input('notes', '');
+
+        if ($purchaseId <= 0) {
+            return response()->json(['status' => false, 'message' => 'Invalid Purchase ID']);
+        }
+        if ($amount <= 0) {
+            return response()->json(['status' => false, 'message' => 'Payment amount must be greater than 0']);
+        }
+
+        $purchase = Purchase::find($purchaseId);
+        if (!$purchase) {
+            return response()->json(['status' => false, 'message' => 'Purchase invoice not found']);
+        }
+
+        if ($purchase->status !== 'submitted') {
+            return response()->json(['status' => false, 'message' => 'Cannot make payment for a draft purchase']);
+        }
+
+        $currentPaid = floatval($purchase->paid_amount);
+        $currentBalance = floatval($purchase->balance_amount);
+
+        if ($currentBalance <= 0) {
+            return response()->json(['status' => false, 'message' => 'This purchase has already been fully paid']);
+        }
+
+        $newPaid = $currentPaid + $amount;
+        $newBalance = max(0.00, $currentBalance - $amount);
+
+        DB::beginTransaction();
+        try {
+            $purchase->update([
+                'paid_amount' => $newPaid,
+                'balance_amount' => $newBalance
+            ]);
+
+            PurchasePayment::create([
+                'purchase_id' => $purchase->id,
+                'company_id' => $purchase->company_id,
+                'amount' => $amount,
+                'payment_method' => $paymentMethod,
+                'payment_date' => $paymentDate,
+                'notes' => $notes
+            ]);
+
+            DB::commit();
+
+            return response()->json([
+                'status' => true,
+                'message' => 'Payment recorded successfully',
+                'paid_amount' => $newPaid,
+                'balance_amount' => $newBalance
+            ]);
+        } catch (\Exception $e) {
+            DB::rollBack();
+            return response()->json([
+                'status' => false,
+                'message' => 'Error recording payment: ' . $e->getMessage()
+            ]);
+        }
+    }
+
+    /**
+     * Get payment history for a specific purchase invoice.
+     */
+    public function getPurchasePayments(Request $request)
+    {
+        $purchaseId = intval($request->query('purchase_id') ?: $request->input('purchase_id', 0));
+        if ($purchaseId <= 0) {
+            return response()->json(['status' => false, 'message' => 'Invalid Purchase ID']);
+        }
+
+        $payments = PurchasePayment::where('purchase_id', $purchaseId)
+            ->orderBy('id', 'desc')
+            ->get();
+
+        return response()->json([
+            'status' => true,
+            'data' => $payments
+        ]);
+    }
+
+    /**
+     * Get ALL payment history for a specific supplier (across all their invoices).
+     */
+    public function getSupplierPayments(Request $request)
+    {
+        $supplierId = intval($request->query('supplier_id') ?: $request->input('supplier_id', 0));
+        if ($supplierId <= 0) {
+            return response()->json(['status' => false, 'message' => 'Invalid Supplier ID']);
+        }
+
+        $payments = DB::table('purchase_payments as pp')
+            ->join('purchases as p', 'pp.purchase_id', '=', 'p.id')
+            ->where('p.supplier_id', $supplierId)
+            ->select(
+                'pp.id',
+                'pp.purchase_id',
+                'pp.amount',
+                'pp.payment_method',
+                'pp.payment_date',
+                'pp.notes',
+                'pp.created_at',
+                'p.purchase_no',
+                'p.total_amount as invoice_total',
+                'p.purchase_date as invoice_date'
+            )
+            ->orderBy('pp.payment_date', 'desc')
+            ->orderBy('pp.id', 'desc')
+            ->get();
+
+        return response()->json([
+            'status' => true,
+            'data'   => $payments
+        ]);
+    }
+
+    /**
+     * Pay bulk amount for a supplier – FIFO distribution across all pending invoices.
+     */
+    public function paySupplierBulk(Request $request)
+    {
+        $supplierId    = intval($request->input('supplier_id', 0));
+        $totalAmount   = floatval($request->input('amount', 0));
+        $paymentMethod = $request->input('payment_method', 'cash');
+        $paymentDate   = $request->input('payment_date', date('Y-m-d'));
+        $notes         = $request->input('notes', '');
+
+        if ($supplierId <= 0) {
+            return response()->json(['status' => false, 'message' => 'Invalid Supplier ID']);
+        }
+        if ($totalAmount <= 0) {
+            return response()->json(['status' => false, 'message' => 'Payment amount must be greater than 0']);
+        }
+
+        // Fetch all pending invoices for this supplier, oldest first (FIFO)
+        $pendingInvoices = Purchase::where('supplier_id', $supplierId)
+            ->where('status', 'submitted')
+            ->where('balance_amount', '>', 0)
+            ->orderBy('purchase_date', 'asc')
+            ->orderBy('id', 'asc')
+            ->get();
+
+        if ($pendingInvoices->isEmpty()) {
+            return response()->json(['status' => false, 'message' => 'No pending invoices found for this supplier']);
+        }
+
+        $remaining = $totalAmount;
+        $applied   = [];
+
+        DB::beginTransaction();
+        try {
+            foreach ($pendingInvoices as $invoice) {
+                if ($remaining <= 0) break;
+
+                $balance  = floatval($invoice->balance_amount);
+                $applying = min($remaining, $balance);
+                $remaining -= $applying;
+
+                $newPaid    = floatval($invoice->paid_amount) + $applying;
+                $newBalance = max(0.00, $balance - $applying);
+
+                $invoice->update([
+                    'paid_amount'    => $newPaid,
+                    'balance_amount' => $newBalance
+                ]);
+
+                PurchasePayment::create([
+                    'purchase_id'    => $invoice->id,
+                    'company_id'     => $invoice->company_id,
+                    'amount'         => $applying,
+                    'payment_method' => $paymentMethod,
+                    'payment_date'   => $paymentDate,
+                    'notes'          => $notes
+                ]);
+
+                $applied[] = [
+                    'purchase_id'   => $invoice->id,
+                    'purchase_no'   => $invoice->purchase_no,
+                    'applied'       => $applying,
+                    'new_balance'   => $newBalance
+                ];
+            }
+
+            DB::commit();
+
+            return response()->json([
+                'status'        => true,
+                'message'       => 'Bulk payment recorded and distributed across ' . count($applied) . ' invoice(s)',
+                'applied'       => $applied,
+                'leftover'      => max(0, $remaining)
+            ]);
+        } catch (\Exception $e) {
+            DB::rollBack();
+            return response()->json([
+                'status'  => false,
+                'message' => 'Error recording bulk payment: ' . $e->getMessage()
+            ]);
+        }
     }
 }

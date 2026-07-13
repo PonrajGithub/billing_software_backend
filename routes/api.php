@@ -144,6 +144,7 @@ Route::prefix('product')->group(function () {
     Route::get('get', [ProductController::class, 'get']);
     Route::get('get_by_id', [ProductController::class, 'getById']);
     Route::get('get_by_supplier', [ProductController::class, 'getBySupplier']);
+    Route::get('get_by_code', [ProductController::class, 'getByCode']);
     Route::post('toggle_status_product', [ProductController::class, 'toggleStatusProduct']);
     Route::post('update', [ProductController::class, 'update']);
 });
@@ -188,5 +189,9 @@ Route::prefix('purchase')->group(function () {
     Route::get('get_purchases', [PurchaseController::class, 'getPurchases']);
     Route::get('get_purchase_by_id', [PurchaseController::class, 'getPurchaseById']);
     Route::post('delete_purchase', [PurchaseController::class, 'deletePurchase']);
+    Route::post('pay_purchase', [PurchaseController::class, 'payPurchase']);
+    Route::get('get_payments', [PurchaseController::class, 'getPurchasePayments']);
+    Route::get('get_supplier_payments', [PurchaseController::class, 'getSupplierPayments']);
+    Route::post('pay_supplier_bulk', [PurchaseController::class, 'paySupplierBulk']);
 });
 

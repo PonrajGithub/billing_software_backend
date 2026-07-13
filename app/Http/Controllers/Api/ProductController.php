@@ -167,6 +167,46 @@ class ProductController extends Controller
         return response()->json(["status" => true, "message" => "Status updated successfully"]);
     }
 
+    public function getByCode(Request $request)
+    {
+        $company_id   = intval($request->query('company_id', 0));
+        $product_code = trim($request->query('product_code', ''));
+
+        if (!$company_id || !$product_code) {
+            return response()->json(["status" => false, "message" => "company_id and product_code required"]);
+        }
+
+        $product = DB::table('products as p')
+            ->leftJoin('categories as c', 'p.category_id', '=', 'c.id')
+            ->leftJoin('subcategories as sc', 'p.subcategory_id', '=', 'sc.id')
+            ->leftJoin('brands as b', 'p.brand_id', '=', 'b.id')
+            ->select(
+                'p.id',
+                'p.product_name',
+                'p.product_code',
+                'p.barcode',
+                'p.price',
+                'p.unit',
+                'p.gst_percentage',
+                'p.category_id',
+                'p.subcategory_id',
+                'p.brand_id',
+                'c.name as category_name',
+                'sc.name as subcategory_name',
+                'b.name as brand_name'
+            )
+            ->where('p.company_id', $company_id)
+            ->where('p.product_code', $product_code)
+            ->where('p.is_deleted', 0)
+            ->first();
+
+        if (!$product) {
+            return response()->json(["status" => false, "message" => "Product not found"]);
+        }
+
+        return response()->json(["status" => true, "data" => $product]);
+    }
+
     public function update(Request $request)
     {
         $id             = intval($request->input('id', 0));
