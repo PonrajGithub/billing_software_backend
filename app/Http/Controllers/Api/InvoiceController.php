@@ -50,23 +50,22 @@ class InvoiceController extends Controller
         }
 
         /* CREDIT / CASH LOGIC */
-        if ($payment_type === "credit") {
-            $advance_used    = 0;
-            $effective_total = $total_amount;
-            $final_paid      = 0;
-            $balance_amount  = $total_amount;
-            $payment_status  = "not_paid";
-            $advance_delta   = 0;
-        } else {
-            $advance_balance = 0.0;
-            if ($customer_id > 0) {
-                $cust = Customer::find($customer_id);
-                if ($cust) {
-                    $advance_balance = floatval($cust->advance_balance);
-                }
+        $advance_balance = 0.0;
+        if ($customer_id > 0) {
+            $cust = Customer::find($customer_id);
+            if ($cust) {
+                $advance_balance = floatval($cust->advance_balance);
             }
-            $advance_used    = min($advance_balance, $total_amount);
-            $effective_total = $total_amount - $advance_used;
+        }
+        $advance_used    = min($advance_balance, $total_amount);
+        $effective_total = $total_amount - $advance_used;
+
+        if ($payment_type === "credit") {
+            $final_paid      = $advance_used;
+            $balance_amount  = $effective_total;
+            $payment_status  = $balance_amount <= 0 ? "paid" : ($advance_used > 0 ? "partial" : "not_paid");
+            $advance_delta   = -$advance_used;
+        } else {
             $total_received  = $paid_amount + $advance_used;
 
             if ($total_received >= $total_amount) {
@@ -173,9 +172,10 @@ class InvoiceController extends Controller
             if ($customer_id > 0) {
                 $cust = Customer::find($customer_id);
                 if ($cust) {
+                    $new_advance = max(0.0, floatval($cust->advance_balance) + $advance_delta);
+                    $cust->advance_balance = $new_advance;
+
                     if ($payment_type !== "credit") {
-                        $new_advance = max(0.0, floatval($cust->advance_balance) + $advance_delta);
-                        $cust->advance_balance = $new_advance;
                         $points = floor($total_amount / 100);
                         if ($points > 0) {
                             $cust->loyalty_points = intval($cust->loyalty_points) + $points;
@@ -674,7 +674,7 @@ class InvoiceController extends Controller
         $payment_status = $request->input('payment_status', 'paid');
 
         if ($payment_method === 'credit') {
-            $payment_status = 'pending';
+            $payment_status = 'not_paid';
             $paid_amount    = 0;
             $balance_amount = $total_amount;
         } else {
@@ -709,7 +709,7 @@ class InvoiceController extends Controller
                 "payment_status" => $payment_status,
             ]);
         } catch (\Exception $e) {
-            return response()->json(["status" => false, "message" => $e->getMessage()]);
+            return response()->json(["status" => false, "message" => $e->getMessage()], 500);
         }
     }
 
@@ -720,15 +720,15 @@ class InvoiceController extends Controller
         $payment_method = $request->input('payment_method', 'cash');
 
         if ($invoice_id <= 0) {
-            return response()->json(["status" => false, "message" => "Invalid Invoice ID"]);
+            return response()->json(["status" => false, "message" => "Invalid Invoice ID"], 400);
         }
         if ($amount <= 0) {
-            return response()->json(["status" => false, "message" => "Enter Valid Amount"]);
+            return response()->json(["status" => false, "message" => "Enter Valid Amount"], 400);
         }
 
         $invoice = Invoice::find($invoice_id);
         if (!$invoice) {
-            return response()->json(["status" => false, "message" => "Invoice Not Found"]);
+            return response()->json(["status" => false, "message" => "Invoice Not Found"], 404);
         }
 
         $current_paid = floatval($invoice->paid_amount);
@@ -736,11 +736,18 @@ class InvoiceController extends Controller
 
         $new_paid = $current_paid + $amount;
         $new_balance = max(0.0, $current_balance - $amount);
-        $payment_status = $new_balance <= 0 ? 'paid' : 'pending';
+        $payment_status = $new_balance <= 0 ? 'paid' : 'partial';
 
         DB::beginTransaction();
         try {
             $invoice->update([
+                'paid_amount' => $new_paid,
+                'balance_amount' => $new_balance,
+                'payment_method' => $payment_method,
+                'payment_status' => $payment_status
+            ]);
+
+            Payment::where('invoice_no', $invoice->invoice_no)->update([
                 'paid_amount' => $new_paid,
                 'balance_amount' => $new_balance,
                 'payment_method' => $payment_method,
@@ -754,7 +761,7 @@ class InvoiceController extends Controller
             ]);
         } catch (\Exception $e) {
             DB::rollBack();
-            return response()->json(["status" => false, "message" => $e->getMessage()]);
+            return response()->json(["status" => false, "message" => $e->getMessage()], 500);
         }
     }
 
@@ -815,5 +822,123 @@ class InvoiceController extends Controller
                 "response" => $gstResponse->json()
             ]);
         }
+    }
+
+    public function payCustomerBulk(Request $request)
+    {
+        $company_id     = intval($request->input('company_id', 0));
+        $customer_id    = intval($request->input('customer_id', 0));
+        $total_amount   = floatval($request->input('amount', 0));
+        $payment_method = $request->input('payment_method', 'cash');
+        $payment_date   = $request->input('payment_date', date('Y-m-d'));
+        $notes          = $request->input('notes', '');
+
+        if ($customer_id <= 0) {
+            return response()->json(['status' => false, 'message' => 'Invalid Customer ID'], 400);
+        }
+        if ($total_amount <= 0) {
+            return response()->json(['status' => false, 'message' => 'Payment amount must be greater than 0'], 400);
+        }
+
+        // Fetch all pending invoices for this customer, oldest first (FIFO)
+        $query = Invoice::where('customer_id', $customer_id)
+            ->where('balance_amount', '>', 0);
+            
+        if ($company_id > 0) {
+            $query->where('company_id', $company_id);
+        }
+
+        $pendingInvoices = $query->orderBy('created_at', 'asc')
+            ->orderBy('id', 'asc')
+            ->get();
+
+        $cust = Customer::find($customer_id);
+        if (!$cust) {
+            return response()->json(['status' => false, 'message' => 'Customer not found'], 404);
+        }
+
+        $remaining = $total_amount;
+        $applied   = [];
+
+        DB::beginTransaction();
+        try {
+            if ($pendingInvoices->isNotEmpty()) {
+                foreach ($pendingInvoices as $invoice) {
+                    if ($remaining <= 0) break;
+
+                    $balance  = floatval($invoice->balance_amount);
+                    $applying = min($remaining, $balance);
+                    $remaining -= $applying;
+
+                    $new_paid    = floatval($invoice->paid_amount) + $applying;
+                    $new_balance = max(0.00, $balance - $applying);
+                    $payment_status = $new_balance <= 0 ? 'paid' : 'partial';
+
+                    $invoice->update([
+                        'paid_amount'    => $new_paid,
+                        'balance_amount' => $new_balance,
+                        'payment_method' => $payment_method,
+                        'payment_status' => $payment_status
+                    ]);
+
+                    Payment::where('invoice_no', $invoice->invoice_no)->update([
+                        'paid_amount'    => $new_paid,
+                        'balance_amount' => $new_balance,
+                        'payment_method' => $payment_method,
+                        'payment_status' => $payment_status,
+                        'notes'          => $notes
+                    ]);
+
+                    $applied[] = [
+                        'invoice_id'   => $invoice->id,
+                        'invoice_no'   => $invoice->invoice_no,
+                        'applied'      => $applying,
+                        'new_balance'  => $new_balance
+                    ];
+                }
+            }
+
+            // Update customer pending amount and store any excess in advance_balance
+            $distributed = $total_amount - $remaining;
+            $cust->pending_amount = max(0.00, floatval($cust->pending_amount) - $distributed);
+            
+            if ($remaining > 0) {
+                $cust->advance_balance = floatval($cust->advance_balance) + $remaining;
+            }
+            $cust->save();
+
+            DB::commit();
+
+            return response()->json([
+                'status'   => true,
+                'message'  => 'Bulk payment recorded successfully. Distributed: ₹' . number_format($distributed, 2) . ($remaining > 0 ? ', Leftover stored as advance: ₹' . number_format($remaining, 2) : ''),
+                'applied'  => $applied,
+                'leftover' => max(0.0, $remaining)
+            ]);
+        } catch (\Exception $e) {
+            DB::rollBack();
+            return response()->json([
+                'status'  => false,
+                'message' => 'Error recording bulk payment: ' . $e->getMessage()
+            ], 500);
+        }
+    }
+
+    public function getCustomerPayments(Request $request)
+    {
+        $customerId = intval($request->query('customer_id', 0));
+        if ($customerId <= 0) {
+            return response()->json(["status" => false, "message" => "Customer ID required"]);
+        }
+
+        $payments = DB::table('payments as p')
+            ->leftJoin('invoices as i', 'i.id', '=', 'p.invoice_id')
+            ->select('p.*', DB::raw('p.paid_amount as amount'), DB::raw('DATE(i.created_at) as invoice_date'), DB::raw('DATE(p.updated_at) as payment_date'))
+            ->where('p.customer_id', $customerId)
+            ->where('p.paid_amount', '>', 0)
+            ->orderBy('p.updated_at', 'desc')
+            ->get();
+
+        return response()->json(["status" => true, "data" => $payments]);
     }
 }

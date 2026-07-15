@@ -134,6 +134,8 @@ Route::prefix('invoice')->group(function () {
     Route::post('mark_as_paid', [InvoiceController::class, 'markAsPaid']);
     Route::post('payment', [InvoiceController::class, 'payment']);
     Route::post('update_credit_payment', [InvoiceController::class, 'updateCreditPayment']);
+    Route::post('pay_customer_bulk', [InvoiceController::class, 'payCustomerBulk']);
+    Route::get('get_customer_payments', [InvoiceController::class, 'getCustomerPayments']);
     Route::get('verify_gst', [InvoiceController::class, 'verifyGst']);
 });
 
